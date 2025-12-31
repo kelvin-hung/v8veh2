@@ -146,51 +146,60 @@ def _diag_diffusion_9pt(h: np.ndarray, D: np.ndarray, dx: float) -> np.ndarray:
     return 0.5 * out
 
 
-def _safe_box_smooth_2d(x: np.ndarray, k: int = 3, weight: Optional[np.ndarray] = None) -> np.ndarray:
-    """
-    Box smoothing via integral image; safe for odd/even k.
-    Display-only helper (NOT used in solver).
+def _safe_box_smooth_2d(x, k=3, weight=None, eps=1e-12):
+    """Fast, shape-safe 2D box smoother (display only).
+
+    Uses an integral image with an extra zero border so the window-sum
+    formula always matches shapes. Supports optional weights (e.g., mask).
+    Non-finite values are treated as missing (weight=0).
     """
     if x is None:
         return None
+    x = np.asarray(x, dtype=np.float64)
+    k = int(k) if k is not None else 3
     if k <= 1:
-        return x
-    k = int(k)
+        return x.astype(np.float32) if x.dtype != np.float32 else x
+    if (k % 2) == 0:
+        k += 1
     pad = k // 2
-    # pad with edge values
-    xp = np.pad(x, ((pad, pad), (pad, pad)), mode="edge").astype(np.float64)
+
     if weight is None:
-        wp = np.ones_like(xp)
+        w = np.ones_like(x, dtype=np.float64)
     else:
-        wp = np.pad(weight, ((pad, pad), (pad, pad)), mode="edge").astype(np.float64)
+        w = np.asarray(weight, dtype=np.float64)
+        if w.shape != x.shape:
+            try:
+                w = np.broadcast_to(w, x.shape).astype(np.float64, copy=False)
+            except Exception:
+                w = np.ones_like(x, dtype=np.float64)
 
-    # integral images (prefix sums). IMPORTANT:
-    # We add a leading zero row/col so window sums are always well-defined.
-    c = np.cumsum(np.cumsum(xp * wp, axis=0), axis=1)
-    w = np.cumsum(np.cumsum(wp, axis=0), axis=1)
-    c = np.pad(c, ((1, 0), (1, 0)), mode="constant", constant_values=0.0)
-    w = np.pad(w, ((1, 0), (1, 0)), mode="constant", constant_values=0.0)
+    finite = np.isfinite(x) & np.isfinite(w) & (w > 0)
+    x0 = np.where(finite, x, 0.0)
+    w0 = np.where(finite, w, 0.0)
 
-    # Window sum for each output cell (same shape as x).
-    # With pad=k//2 and xp being edge-padded, the kxk window corresponding to
-    # x[i,j] is xp[i:i+k, j:j+k]. Using integral image, sum = S(i+k,j+k)-S(i,j+k)-S(i+k,j)+S(i,j).
-    nx, ny = x.shape
-    num = (
-        c[k : k + nx, k : k + ny]
-        - c[0:nx, k : k + ny]
-        - c[k : k + nx, 0:ny]
-        + c[0:nx, 0:ny]
-    )
-    den = (
-        w[k : k + nx, k : k + ny]
-        - w[0:nx, k : k + ny]
-        - w[k : k + nx, 0:ny]
-        + w[0:nx, 0:ny]
-    )
+    # Edge padding keeps a stable look near boundaries (display-only).
+    xpad = np.pad(x0, ((pad, pad), (pad, pad)), mode="edge")
+    wpad = np.pad(w0, ((pad, pad), (pad, pad)), mode="edge")
 
-    return (num / np.maximum(den, 1e-30)).astype(x.dtype)
+    H, W = xpad.shape
 
+    # Integral images with an extra zero border (shape-safe window sum).
+    satx = np.zeros((H + 1, W + 1), dtype=np.float64)
+    satw = np.zeros((H + 1, W + 1), dtype=np.float64)
+    satx[1:, 1:] = np.cumsum(np.cumsum(xpad, axis=0), axis=1)
+    satw[1:, 1:] = np.cumsum(np.cumsum(wpad, axis=0), axis=1)
 
+    kk = k
+    num = satx[kk:, kk:] - satx[:-kk, kk:] - satx[kk:, :-kk] + satx[:-kk, :-kk]
+    den = satw[kk:, kk:] - satw[:-kk, kk:] - satw[kk:, :-kk] + satw[:-kk, :-kk]
+
+    out = np.where(den > eps, num / (den + eps), 0.0)
+
+    # Safety: ensure output matches original shape.
+    if out.shape != x.shape:
+        out = out[: x.shape[0], : x.shape[1]]
+
+    return out.astype(np.float32)
 def choose_well_ij(mask: np.ndarray) -> Tuple[int, int]:
     """Choose a default well location: center of active cells."""
     idx = np.argwhere(mask > 0)
