@@ -164,28 +164,29 @@ def _safe_box_smooth_2d(x: np.ndarray, k: int = 3, weight: Optional[np.ndarray] 
     else:
         wp = np.pad(weight, ((pad, pad), (pad, pad)), mode="edge").astype(np.float64)
 
-    # integral images
+    # integral images (prefix sums). IMPORTANT:
+    # We add a leading zero row/col so window sums are always well-defined.
     c = np.cumsum(np.cumsum(xp * wp, axis=0), axis=1)
     w = np.cumsum(np.cumsum(wp, axis=0), axis=1)
+    c = np.pad(c, ((1, 0), (1, 0)), mode="constant", constant_values=0.0)
+    w = np.pad(w, ((1, 0), (1, 0)), mode="constant", constant_values=0.0)
 
-    # summed area table window sum (vectorized)
-    # window corners: (i, j) to (i+k-1, j+k-1)
-    i0 = 0
-    j0 = 0
-    i1 = i0 + x.shape[0]
-    j1 = j0 + x.shape[1]
-
-    A = c[i0:i1, j0:j1]
-    B = c[i0 + k:i1 + k, j0:j1]
-    C = c[i0:i1, j0 + k:j1 + k]
-    D = c[i0 + k:i1 + k, j0 + k:j1 + k]
-    num = D - B - C + A
-
-    Aw = w[i0:i1, j0:j1]
-    Bw = w[i0 + k:i1 + k, j0:j1]
-    Cw = w[i0:i1, j0 + k:j1 + k]
-    Dw = w[i0 + k:i1 + k, j0 + k:j1 + k]
-    den = Dw - Bw - Cw + Aw
+    # Window sum for each output cell (same shape as x).
+    # With pad=k//2 and xp being edge-padded, the kxk window corresponding to
+    # x[i,j] is xp[i:i+k, j:j+k]. Using integral image, sum = S(i+k,j+k)-S(i,j+k)-S(i+k,j)+S(i,j).
+    nx, ny = x.shape
+    num = (
+        c[k : k + nx, k : k + ny]
+        - c[0:nx, k : k + ny]
+        - c[k : k + nx, 0:ny]
+        + c[0:nx, 0:ny]
+    )
+    den = (
+        w[k : k + nx, k : k + ny]
+        - w[0:nx, k : k + ny]
+        - w[k : k + nx, 0:ny]
+        + w[0:nx, 0:ny]
+    )
 
     return (num / np.maximum(den, 1e-30)).astype(x.dtype)
 
